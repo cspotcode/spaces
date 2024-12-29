@@ -374,7 +374,7 @@ export var spacesService = {
             // 將更新操作封裝為一個函數並加入隊列
             spacesService.queue.push(() => {
                 session.lastAccess = new Date();
-            
+
                 // 保存 session 並在完成後發送更新通知
                 spacesService.saveExistingSession(session.id, () => {
                     chrome.runtime.sendMessage({

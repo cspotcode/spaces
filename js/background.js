@@ -20,18 +20,9 @@ const screen = {
 
 // eslint-disable-next-line no-unused-vars, no-var
 var spaces = (() => {
-    let spacesPopupWindowId = false;
-    let spacesOpenWindowId = false;
-    let lastNonPopupWindowId = null; // 用於追蹤最後一次非彈出窗口的焦點
+    let spacesOpenWindowId = null; // 追蹤主 Spaces 窗口的 ID
     const noop = () => {};
     const debug = false;
-
-    // 更新 lastNonPopupWindowId 的輔助函數
-    function updateLastNonPopupWindowId(windowId) {
-        if (windowId && windowId !== spacesOpenWindowId && windowId !== spacesPopupWindowId) {
-            lastNonPopupWindowId = windowId;
-        }
-    }
 
     // LISTENERS
 
@@ -64,8 +55,8 @@ var spaces = (() => {
         });
     });
     chrome.windows.onRemoved.addListener(windowId => {
-        if (windowId === lastNonPopupWindowId) {
-            lastNonPopupWindowId = null;
+        if (windowId === spacesOpenWindowId) {
+            spacesOpenWindowId = null;
         }
 
         if (checkInternalSpacesWindows(windowId, true)) return;
@@ -98,19 +89,14 @@ var spaces = (() => {
         // popup prematurely.
         if (
             windowId === chrome.windows.WINDOW_ID_NONE ||
-            windowId === spacesPopupWindowId
+            checkInternalSpacesWindows(windowId, false)
         ) {
             return;
         }
 
-        if (!debug && spacesPopupWindowId) {
-            if (spacesPopupWindowId) {
-                closePopupWindow();
-            }
+        if (!debug && spacesOpenWindowId) {
+            closePopupWindow();
         }
-
-        // 更新 lastNonPopupWindowId
-        updateLastNonPopupWindowId(windowId);
 
         spacesService.handleWindowFocussed(windowId);
     });
@@ -118,10 +104,10 @@ var spaces = (() => {
     // add listeners for message requests from other extension pages (spaces.html & tab.html)
     // 修改或新增 requestCurrentSpace 方法
     function requestCurrentSpace() {
-        if (!lastNonPopupWindowId) {
+        if (!spacesOpenWindowId) {
             return null; // 或者返回一個預設值
         }
-        return spacesService.getSessionByWindowId(lastNonPopupWindowId);
+        return spacesService.getSessionByWindowId(spacesOpenWindowId);
     }
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (debug) {
@@ -267,16 +253,16 @@ var spaces = (() => {
                 return true;
 
             case 'requestShowSpaces':
-                // 優先使用 lastNonPopupWindowId
-                if (lastNonPopupWindowId) {
-                    showSpacesOpenWindow(lastNonPopupWindowId);
-                } else {
-                    // 如果 lastNonPopupWindowId 不存在，則獲取最後聚焦的窗口
-                    chrome.windows.getLastFocused({ populate: false }, window => {
-                        lastNonPopupWindowId = window.id; // 更新 lastNonPopupWindowId
-                        showSpacesOpenWindow(window.id);
+                // 添加短暫延遲以避免 race condition
+                setTimeout(() => {
+                    getFocusedNonPopupWindow((focusedWindowId) => {
+                        if (focusedWindowId) {
+                            showSpacesOpenWindow(focusedWindowId);
+                        } else {
+                            console.error('No focused non-popup window found.');
+                        }
                     });
-                }
+                }, 100); // 100 毫秒延遲
                 return false;
 
             case 'requestShowSwitcher':
@@ -300,11 +286,6 @@ var spaces = (() => {
                 windowId = _cleanParameter(request.windowId);
                 sessionId = _cleanParameter(request.sessionId);
                 
-                // console.log('switchToSpace called with:', {
-                //     windowId: windowId,
-                //     sessionId: sessionId
-                // });
-
                 if (windowId) {
                     handleLoadWindow(windowId);
                 } else if (sessionId) {
@@ -490,27 +471,70 @@ var spaces = (() => {
         chrome.tabs.create({ url: 'chrome://extensions/configureCommands' });
     }
 
+    /**
+     * 獲取當前聚焦的非 Spaces 窗口 ID
+     * @param {function} callback - 回調函數，接收窗口 ID 作為參數
+     */
+    function getFocusedNonPopupWindow(callback) {
+        chrome.windows.getAll({ populate: false }, (windows) => {
+            const focusedWindow = windows.find(window => window.focused && !checkInternalSpacesWindows(window.id, false));
+            if (focusedWindow) {
+                console.log(`Focused non-popup window ID: ${focusedWindow.id}`);
+                callback(focusedWindow.id);
+            } else {
+                console.error('No focused non-popup window found.');
+                callback(null);
+            }
+        });
+    }
+
+    /**
+     * 檢查給定的窗口 ID 是否為 Spaces 窗口
+     * @param {number} windowId - 窗口 ID
+     * @param {boolean} windowClosed - 窗口是否被關閉
+     * @returns {boolean} - 是否為 Spaces 窗口
+     */
+    function checkInternalSpacesWindows(windowId, windowClosed) {
+        if (windowId === spacesOpenWindowId) {
+            if (windowClosed) {
+                console.log(`Spaces window with ID ${windowId} has been closed.`);
+                spacesOpenWindowId = null;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 顯示或聚焦 Spaces 窗口
+     * @param {number} windowId - 用戶窗口 ID
+     * @param {boolean} editMode - 是否以編輯模式打開
+     */
     function showSpacesOpenWindow(windowId, editMode) {
         let url;
 
         if (editMode && windowId) {
-            url = chrome.runtime.getURL(
-                `spaces.html#windowId=${windowId}&editMode=true`
-            );
+            url = chrome.runtime.getURL(`spaces.html#windowId=${windowId}&editMode=true`);
         } else if (windowId) {
             url = chrome.runtime.getURL(`spaces.html#windowId=${windowId}`);
         } else {
             url = chrome.runtime.getURL('spaces.html');
         }
 
-        // 如果已經存在開啟的 spaces 窗口，則只需聚焦並更新 URL
+        // 如果已經存在開啟的 Spaces 窗口，則只需聚焦並更新 URL
         if (spacesOpenWindowId) {
-            chrome.windows.get(spacesOpenWindowId, { populate: true }, window => {
-                chrome.windows.update(spacesOpenWindowId, { focused: true }, () => {
-                    if (window.tabs[0].id) {
-                        chrome.tabs.update(window.tabs[0].id, { url });
-                    }
-                });
+            chrome.windows.get(spacesOpenWindowId, { populate: true }, (spacesWindow) => {
+                if (spacesWindow) {
+                    chrome.windows.update(spacesOpenWindowId, { focused: true }, () => {
+                        if (spacesWindow.tabs[0] && spacesWindow.tabs[0].id) {
+                            chrome.tabs.update(spacesWindow.tabs[0].id, { url });
+                            console.log(`Focused existing Spaces window with ID: ${spacesOpenWindowId}`);
+                        }
+                    });
+                } else {
+                    // 如果已追蹤的 Spaces 窗口不存在，重置追蹤 ID
+                    spacesOpenWindowId = null;
+                }
             });
         } else {
             // 否則，創建一個新的 pop-up 窗口
@@ -522,282 +546,68 @@ var spaces = (() => {
                     width: Math.min(screen.width, 1000),
                     top: 0,
                     left: 0,
+                    focused: true // 確保 pop-up 獲取焦點
                 },
-                window => {
+                (window) => {
                     spacesOpenWindowId = window.id;
+                    console.log(`Created new Spaces pop-up window with ID: ${window.id}`);
                 }
             );
         }
     }
-    function showSpacesMoveWindow(tabUrl) {
-        createOrShowSpacesPopupWindow('move', tabUrl);
-    }
-    function showSpacesSwitchWindow() {
-        createOrShowSpacesPopupWindow('switch');
-    }
 
-    async function generatePopupParams(action, tabUrl) {
-        // get currently highlighted tab
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs.length === 0) return '';
-
-        const activeTab = tabs[0];
-
-        // make sure that the active tab is not from an internal spaces window
-        if (checkInternalSpacesWindows(activeTab.windowId, false)) {
-            return '';
-        }
-
-        const session = spacesService.getSessionByWindowId(activeTab.windowId);
-
-        const name = session ? session.name : '';
-
-        let params = `action=${action}&windowId=${activeTab.windowId}&sessionName=${name}`;
-
-        if (tabUrl) {
-            params += `&url=${encodeURIComponent(tabUrl)}`;
-        } else {
-            params += `&tabId=${activeTab.id}`;
-        }
-        return params;
-    }
-
-    function createOrShowSpacesPopupWindow(action, tabUrl) {
-        generatePopupParams(action, tabUrl).then(params => {
-            const popupUrl = `${chrome.runtime.getURL(
-                'popup.html'
-            )}#opener=bg&${params}`;
-            // if spaces  window already exists
-            if (spacesPopupWindowId) {
-                chrome.windows.get(
-                    spacesPopupWindowId,
-                    { populate: true },
-                    window => {
-                        // if window is currently focused then don't update
-                        if (window.focused) {
-                            // else update popupUrl and give it focus
-                        } else {
-                            chrome.windows.update(spacesPopupWindowId, {
-                                focused: true,
-                            });
-                            if (window.tabs[0].id) {
-                                chrome.tabs.update(window.tabs[0].id, {
-                                    url: popupUrl,
-                                });
-                            }
-                        }
-                    }
-                );
-
-                // otherwise create it
-            } else {
-                chrome.windows.create(
-                    {
-                        type: 'popup',
-                        url: popupUrl,
-                        focused: true,
-                        height: 450,
-                        width: 310,
-                        top: screen.height - 450,
-                        left: screen.width - 310,
-                    },
-                    window => {
-                        spacesPopupWindowId = window.id;
-                    }
-                );
-            }
-        });
-    }
-
+    /**
+     * 關閉 Spaces pop-up 窗口
+     */
     function closePopupWindow() {
-        if (spacesPopupWindowId) {
-            chrome.windows.get(
-                spacesPopupWindowId,
-                { populate: true },
-                spacesWindow => {
-                    if (!spacesWindow) return;
+        if (spacesOpenWindowId) {
+            chrome.windows.get(spacesOpenWindowId, { populate: true }, (spacesWindow) => {
+                if (!spacesWindow) {
+                    spacesOpenWindowId = null;
+                    return;
+                }
 
-                    // remove popup from history
-                    if (
-                        spacesWindow.tabs.length > 0 &&
-                        spacesWindow.tabs[0].url
-                    ) {
-                        chrome.history.deleteUrl({
-                            url: spacesWindow.tabs[0].url,
-                        });
-                    }
-
-                    // remove popup window
-                    chrome.windows.remove(spacesWindow.id, () => {
-                        if (chrome.runtime.lastError) {
-                            // eslint-disable-next-line no-console
-                            console.log(chrome.runtime.lastError.message);
-                        }
+                // 從歷史記錄中刪除 pop-up 窗口的 URL
+                if (spacesWindow.tabs.length > 0 && spacesWindow.tabs[0].url) {
+                    chrome.history.deleteUrl({
+                        url: spacesWindow.tabs[0].url,
+                    }, () => {
+                        console.log(`Deleted history for Spaces window URL: ${spacesWindow.tabs[0].url}`);
                     });
                 }
-            );
+
+                // 移除 pop-up 窗口
+                chrome.windows.remove(spacesWindow.id, () => {
+                    if (chrome.runtime.lastError) {
+                        console.error(`Error closing Spaces window: ${chrome.runtime.lastError.message}`);
+                    } else {
+                        console.log(`Closed Spaces window with ID: ${spacesWindow.id}`);
+                        spacesOpenWindowId = null;
+                    }
+                });
+            });
         }
     }
 
+    /**
+     * 更新 Spaces 窗口信息
+     * @param {string} source - 更新來源
+     */
     function updateSpacesWindow(source) {
-        if (debug)
-            // eslint-disable-next-line no-console
+        if (debug) {
             console.log(`updateSpacesWindow triggered. source: ${source}`);
+        }
 
         requestAllSpaces(allSpaces => {
             chrome.runtime.sendMessage({
                 action: 'updateSpaces',
                 spaces: allSpaces,
+            }, () => {
+                if (chrome.runtime.lastError) {
+                    console.error(`Error sending updateSpaces message: ${chrome.runtime.lastError.message}`);
+                }
             });
         });
-    }
-
-    function checkInternalSpacesWindows(windowId, windowClosed) {
-        if (windowId === spacesOpenWindowId) {
-            if (windowClosed) spacesOpenWindowId = false;
-            return true;
-        }
-        if (windowId === spacesPopupWindowId) {
-            if (windowClosed) spacesPopupWindowId = false;
-            return true;
-        }
-        return false;
-    }
-
-    async function checkSessionOverwrite(session) {
-        // make sure session being overwritten is not currently open
-        if (session.windowId) {
-            await chrome.runtime.sendMessage({
-                action: 'uiAlert',
-                message: `A session with the name '${session.name}' is currently open an cannot be overwritten`
-            });
-            return false;
-
-            // otherwise prompt to see if user wants to overwrite session
-        }
-        return await chrome.runtime.sendMessage({
-            action: 'uiConfirm',
-            message: `Replace existing space: ${session.name}?`
-        });
-    }
-
-    async function checkSessionDelete(session) {
-        return await chrome.runtime.sendMessage({
-            action: 'uiConfirm',
-            message: `Are you sure you want to delete the space: ${session.name}?`
-        });
-    }
-
-    async function requestHotkeys() {
-        const commands = await chrome.commands.getAll();
-        let switchStr;
-        let moveStr;
-        let spacesStr;
-
-        commands.forEach(command => {
-            if (command.name === 'spaces-switch') {
-                switchStr = command.shortcut;
-            } else if (command.name === 'spaces-move') {
-                moveStr = command.shortcut;
-            } else if (command.name === 'spaces-open') {
-                spacesStr = command.shortcut;
-            }
-        });
-
-        return {
-            switchCode: switchStr,
-            moveCode: moveStr,
-            spacesCode: spacesStr,
-        };
-    }
-
-    function requestTabDetail(tabId, callback) {
-        chrome.tabs.get(tabId, callback);
-    }
-
-    async function requestCurrentSpace() {
-        const window = await chrome.windows.getCurrent();
-        return await requestSpaceFromWindowId(window.id);
-    }
-
-    // returns a 'space' object which is essentially the same as a session object
-    // except that includes space.sessionId (session.id) and space.windowId
-    async function requestSpaceFromWindowId(windowId) {
-        // first check for an existing session matching this windowId
-        const session = spacesService.getSessionByWindowId(windowId);
-
-        if (session) {
-            return {
-                sessionId: session.id,
-                windowId: session.windowId,
-                name: session.name,
-                tabs: session.tabs,
-                history: session.history,
-            };
-
-            // otherwise build a space object out of the actual window
-        } else {
-            let window;
-            try {
-                window = await chrome.windows.get(windowId, { populate: true });
-            } catch(e) {
-                // if failed to load requested window
-                return false;
-            }
-            return {
-                sessionId: false,
-                windowId: window.id,
-                name: false,
-                tabs: window.tabs,
-                history: false,
-            };
-        }
-    }
-
-    async function requestSpaceFromSessionId(sessionId) {
-        const session = spacesService.getSessionBySessionId(sessionId);
-
-        return {
-            sessionId: session.id,
-            windowId: session.windowId,
-            name: session.name,
-            tabs: session.tabs,
-            history: session.history,
-        };
-    }
-
-    function requestAllSpaces(callback) {
-        const sessions = spacesService.getAllSessions();
-        const allSpaces = sessions
-            .map(session => {
-                return { sessionId: session.id, ...session };
-            })
-            .filter(session => {
-                return session && session.tabs && session.tabs.length > 0;
-            });
-
-        // sort results
-        allSpaces.sort(spaceDateCompare);
-
-        callback(allSpaces);
-    }
-
-    function spaceDateCompare(a, b) {
-        // order open sessions first
-        if (a.windowId && !b.windowId) {
-            return -1;
-        }
-        if (!a.windowId && b.windowId) {
-            return 1;
-        }
-        // then order by last access date
-        if (a.lastAccess > b.lastAccess) {
-            return -1;
-        }
-        if (a.lastAccess < b.lastAccess) {
-            return 1;
-        }
-        return 0;
     }
 
     function handleLoadSession(sessionId, tabUrl) {
@@ -876,20 +686,44 @@ var spaces = (() => {
         }
     }
 
+    /**
+     * 聚焦指定窗口
+     * @param {number} windowId - 窗口 ID
+     */
     function focusWindow(windowId) {
-        chrome.windows.update(windowId, { focused: true });
+        chrome.windows.update(windowId, { focused: true }, () => {
+            if (chrome.runtime.lastError) {
+                console.error(`Error focusing window ${windowId}: ${chrome.runtime.lastError.message}`);
+            } else {
+                console.log(`Focused window with ID: ${windowId}`);
+            }
+        });
     }
 
+    /**
+     * 聚焦窗口中的指定標籤頁，若不存在則創建新的標籤頁
+     * @param {object} window - 窗口對象
+     * @param {string} tabUrl - 標籤頁 URL
+     */
     function focusOrLoadTabInWindow(window, tabUrl) {
         const match = window.tabs.some(tab => {
             if (tab.url === tabUrl) {
-                chrome.tabs.update(tab.id, { active: true });
+                chrome.tabs.update(tab.id, { active: true }, () => {
+                    console.log(`Focused existing tab with ID: ${tab.id} in window ID: ${window.id}`);
+                });
                 return true;
             }
             return false;
         });
+
         if (!match) {
-            chrome.tabs.create({ url: tabUrl });
+            chrome.tabs.create({ url: tabUrl, windowId: window.id }, (tab) => {
+                if (chrome.runtime.lastError) {
+                    console.error(`Error creating tab: ${chrome.runtime.lastError.message}`);
+                } else {
+                    console.log(`Created new tab with ID: ${tab.id} in window ID: ${window.id}`);
+                }
+            });
         }
     }
 
@@ -1123,6 +957,222 @@ var spaces = (() => {
         spacesService.queueWindowEvent(windowId);
 
         callback(true);
+    }
+
+    async function checkSessionOverwrite(session) {
+        // make sure session being overwritten is not currently open
+        if (session.windowId) {
+            await chrome.runtime.sendMessage({
+                action: 'uiAlert',
+                message: `A session with the name '${session.name}' is currently open an cannot be overwritten`
+            });
+            return false;
+
+            // otherwise prompt to see if user wants to overwrite session
+        }
+        return await chrome.runtime.sendMessage({
+            action: 'uiConfirm',
+            message: `Replace existing space: ${session.name}?`
+        });
+    }
+
+    async function checkSessionDelete(session) {
+        return await chrome.runtime.sendMessage({
+            action: 'uiConfirm',
+            message: `Are you sure you want to delete the space: ${session.name}?`
+        });
+    }
+
+    async function requestHotkeys() {
+        const commands = await chrome.commands.getAll();
+        let switchStr;
+        let moveStr;
+        let spacesStr;
+
+        commands.forEach(command => {
+            if (command.name === 'spaces-switch') {
+                switchStr = command.shortcut;
+            } else if (command.name === 'spaces-move') {
+                moveStr = command.shortcut;
+            } else if (command.name === 'spaces-open') {
+                spacesStr = command.shortcut;
+            }
+        });
+
+        return {
+            switchCode: switchStr,
+            moveCode: moveStr,
+            spacesCode: spacesStr,
+        };
+    }
+
+    function requestTabDetail(tabId, callback) {
+        chrome.tabs.get(tabId, callback);
+    }
+
+    async function requestCurrentSpace() {
+        const window = await chrome.windows.getCurrent();
+        return await requestSpaceFromWindowId(window.id);
+    }
+
+    // returns a 'space' object which is essentially the same as a session object
+    // except that includes space.sessionId (session.id) and space.windowId
+    async function requestSpaceFromWindowId(windowId) {
+        // first check for an existing session matching this windowId
+        const session = spacesService.getSessionByWindowId(windowId);
+
+        if (session) {
+            return {
+                sessionId: session.id,
+                windowId: session.windowId,
+                name: session.name,
+                tabs: session.tabs,
+                history: session.history,
+            };
+
+            // otherwise build a space object out of the actual window
+        } else {
+            let window;
+            try {
+                window = await chrome.windows.get(windowId, { populate: true });
+            } catch(e) {
+                // if failed to load requested window
+                return false;
+            }
+            return {
+                sessionId: false,
+                windowId: window.id,
+                name: false,
+                tabs: window.tabs,
+                history: false,
+            };
+        }
+    }
+
+    async function requestSpaceFromSessionId(sessionId) {
+        const session = spacesService.getSessionBySessionId(sessionId);
+
+        return {
+            sessionId: session.id,
+            windowId: session.windowId,
+            name: session.name,
+            tabs: session.tabs,
+            history: session.history,
+        };
+    }
+
+    function requestAllSpaces(callback) {
+        const sessions = spacesService.getAllSessions();
+        const allSpaces = sessions
+            .map(session => {
+                return { sessionId: session.id, ...session };
+            })
+            .filter(session => {
+                return session && session.tabs && session.tabs.length > 0;
+            });
+
+        // sort results
+        allSpaces.sort(spaceDateCompare);
+
+        callback(allSpaces);
+    }
+
+    function spaceDateCompare(a, b) {
+        // order open sessions first
+        if (a.windowId && !b.windowId) {
+            return -1;
+        }
+        if (!a.windowId && b.windowId) {
+            return 1;
+        }
+        // then order by last access date
+        if (a.lastAccess > b.lastAccess) {
+            return -1;
+        }
+        if (a.lastAccess < b.lastAccess) {
+            return 1;
+        }
+        return 0;
+    }
+
+    function showSpacesMoveWindow(tabUrl) {
+        createOrShowSpacesPopupWindow('move', tabUrl);
+    }
+    function showSpacesSwitchWindow() {
+        createOrShowSpacesPopupWindow('switch');
+    }
+
+    async function generatePopupParams(action, tabUrl) {
+        // get currently highlighted tab
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0) return '';
+
+        const activeTab = tabs[0];
+
+        // make sure that the active tab is not from an internal spaces window
+        if (checkInternalSpacesWindows(activeTab.windowId, false)) {
+            return '';
+        }
+
+        const session = spacesService.getSessionByWindowId(activeTab.windowId);
+
+        const name = session ? session.name : '';
+
+        let params = `action=${action}&windowId=${activeTab.windowId}&sessionName=${name}`;
+
+        if (tabUrl) {
+            params += `&url=${encodeURIComponent(tabUrl)}`;
+        } else {
+            params += `&tabId=${activeTab.id}`;
+        }
+        return params;
+    }
+
+    function createOrShowSpacesPopupWindow(action, tabUrl) {
+        generatePopupParams(action, tabUrl).then(params => {
+            const popupUrl = `${chrome.runtime.getURL(
+                'popup.html'
+            )}#opener=bg&${params}`;
+            // if spaces  window already exists
+            if (spacesOpenWindowId) {
+                chrome.windows.get(
+                    spacesOpenWindowId,
+                    { populate: true },
+                    window => {
+                        // if window is currently focused then don't update
+                        if (window.focused) {
+                            // else update popupUrl and give it focus
+                        } else {
+                            chrome.windows.update(spacesOpenWindowId, {
+                                focused: true,
+                            });
+                            if (window.tabs[0].id) {
+                                chrome.tabs.update(window.tabs[0].id, {
+                                    url: popupUrl,
+                                });
+                            }
+                        }
+                    }
+                );
+
+                // otherwise create it
+            } else {
+                chrome.windows.create(
+                    {
+                        type: 'popup',
+                        url: popupUrl,
+                        focused: true,
+                        height: 450,
+                        width: 310,
+                        top: screen.height - 450,
+                        left: screen.width - 310,
+                    },
+                    window => {
+                        spacesOpenWindowId = window.id;
+                    }
+                );
+            }
+        });
     }
 
     return {

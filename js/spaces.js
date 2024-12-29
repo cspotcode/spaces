@@ -556,15 +556,21 @@ import * as utils from './utils.js';
     }
 
     function requestCurrentSpace() {
-        return new Promise(resolve => {
-            if (spacesService.lastNonPopupWindowId) {
-                fetchSpaceDetail(false, spacesService.lastNonPopupWindowId, resolve);
-            } else {
-                chrome.windows.getLastFocused({ populate: true }, window => {
-                    spacesService.lastNonPopupWindowId = window.id;
+        return new Promise((resolve, reject) => {
+            chrome.windows.getLastFocused({ populate: true }, (window) => {
+                if (checkInternalSpacesWindows(window.id, false)) {
+                    // 如果獲取的窗口是 Spaces pop-up，則嘗試獲取真正的聚焦窗口
+                    getFocusedNonPopupWindow((focusedWindowId) => {
+                        if (focusedWindowId) {
+                            fetchSpaceDetail(false, focusedWindowId, resolve);
+                        } else {
+                            reject('No focused non-popup window found.');
+                        }
+                    });
+                } else {
                     fetchSpaceDetail(false, window.id, resolve);
-                });
-            }
+                }
+            });
         });
     }
 
