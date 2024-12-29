@@ -24,30 +24,20 @@ const spaces = Comlink.wrap(createEndpoint(chrome.runtime.connect()));
     document.addEventListener('DOMContentLoaded', async () => {
         const url = utils.getHashVariable('url', window.location.href);
         globalUrl = url !== '' ? decodeURIComponent(url) : false;
-        const windowId = utils.getHashVariable(
-            'windowId',
-            window.location.href
-        );
+        const windowId = utils.getHashVariable('windowId', window.location.href);
         globalWindowId = windowId !== '' ? windowId : false;
-        globalTabId = utils.getHashVariable('tabId', window.location.href);
-        const sessionName = utils.getHashVariable(
-            'sessionName',
-            window.location.href
-        );
-        globalSessionName =
-            sessionName && sessionName !== 'false' ? sessionName : false;
+        globalSessionName = utils.getHashVariable('sessionName', window.location.href);
         const action = utils.getHashVariable('action', window.location.href);
-
+    
         const requestSpacePromise = globalWindowId
             ? spaces.requestSpaceFromWindowId(parseInt(globalWindowId, 10))
             : spaces.requestCurrentSpace();
-
+    
         requestSpacePromise.then(space => {
             globalCurrentSpace = space;
             renderCommon();
             routeView(action);
         });
-
     });
 
     function routeView(action) {

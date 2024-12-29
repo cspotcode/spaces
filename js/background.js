@@ -22,6 +22,7 @@ const screen = {
 var spaces = (() => {
     let spacesPopupWindowId = false;
     let spacesOpenWindowId = false;
+    let lastNonPopupWindowId = null; // 新增變量來追蹤最後一次非彈出窗口的焦點
     const noop = () => {};
     const debug = false;
 
@@ -100,7 +101,13 @@ var spaces = (() => {
     });
 
     // add listeners for message requests from other extension pages (spaces.html & tab.html)
-
+    // 修改或新增 requestCurrentSpace 方法
+    function requestCurrentSpace() {
+        if (!lastNonPopupWindowId) {
+            return null; // 或者返回一個預設值
+        }
+        return spacesService.getSessionByWindowId(lastNonPopupWindowId);
+    }
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (debug) {
             // eslint-disable-next-line no-console
@@ -245,14 +252,9 @@ var spaces = (() => {
                 return true;
 
             case 'requestShowSpaces':
-                windowId = _cleanParameter(request.windowId);
-
-                // show the spaces tab in edit mode for the passed in windowId
-                if (windowId) {
-                    showSpacesOpenWindow(windowId, request.edit);
-                } else {
-                    showSpacesOpenWindow();
-                }
+                chrome.windows.getLastFocused({ populate: false }, window => {
+                    showSpacesOpenWindow(window.id);
+                });
                 return false;
 
             case 'requestShowSwitcher':
@@ -375,7 +377,12 @@ var spaces = (() => {
                     });
                 }
                 return false;
-
+            
+            // 新增處理 requestCurrentSpace 的 case
+            case 'requestCurrentSpace':
+                const currentSpace = requestCurrentSpace();
+                sendResponse(currentSpace);
+                return true;
             default:
                 return false;
         }
