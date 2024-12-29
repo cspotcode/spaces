@@ -29,14 +29,20 @@ const spaces = Comlink.wrap(createEndpoint(chrome.runtime.connect()));
         globalSessionName = utils.getHashVariable('sessionName', window.location.href);
         const action = utils.getHashVariable('action', window.location.href);
     
-        const requestSpacePromise = globalWindowId
-            ? spaces.requestSpaceFromWindowId(parseInt(globalWindowId, 10))
-            : spaces.requestCurrentSpace();
+        let requestSpacePromise;
+        if (globalWindowId) {
+            requestSpacePromise = spaces.requestSpaceFromWindowId(parseInt(globalWindowId, 10));
+        } else {
+            requestSpacePromise = spaces.requestCurrentSpace();
+        }
     
         requestSpacePromise.then(space => {
             globalCurrentSpace = space;
             renderCommon();
             routeView(action);
+        }).catch(error => {
+            console.error('Error fetching space:', error);
+            // 可選：顯示錯誤訊息給用戶
         });
     });
 

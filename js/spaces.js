@@ -557,9 +557,14 @@ import * as utils from './utils.js';
 
     function requestCurrentSpace() {
         return new Promise(resolve => {
-            chrome.windows.getLastFocused({ populate: true }, window => {
-                fetchSpaceDetail(false, window.id, resolve);
-            });
+            if (spacesService.lastNonPopupWindowId) {
+                fetchSpaceDetail(false, spacesService.lastNonPopupWindowId, resolve);
+            } else {
+                chrome.windows.getLastFocused({ populate: true }, window => {
+                    spacesService.lastNonPopupWindowId = window.id;
+                    fetchSpaceDetail(false, window.id, resolve);
+                });
+            }
         });
     }
 

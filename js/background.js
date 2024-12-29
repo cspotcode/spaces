@@ -22,9 +22,16 @@ const screen = {
 var spaces = (() => {
     let spacesPopupWindowId = false;
     let spacesOpenWindowId = false;
-    let lastNonPopupWindowId = null; // 新增變量來追蹤最後一次非彈出窗口的焦點
+    let lastNonPopupWindowId = null; // 用於追蹤最後一次非彈出窗口的焦點
     const noop = () => {};
     const debug = false;
+
+    // 更新 lastNonPopupWindowId 的輔助函數
+    function updateLastNonPopupWindowId(windowId) {
+        if (windowId && windowId !== spacesOpenWindowId && windowId !== spacesPopupWindowId) {
+            lastNonPopupWindowId = windowId;
+        }
+    }
 
     // LISTENERS
 
@@ -57,6 +64,10 @@ var spaces = (() => {
         });
     });
     chrome.windows.onRemoved.addListener(windowId => {
+        if (windowId === lastNonPopupWindowId) {
+            lastNonPopupWindowId = null;
+        }
+
         if (checkInternalSpacesWindows(windowId, true)) return;
         spacesService.handleWindowRemoved(windowId, true, () => {
             updateSpacesWindow('windows.onRemoved');
@@ -97,6 +108,10 @@ var spaces = (() => {
                 closePopupWindow();
             }
         }
+
+        // 更新 lastNonPopupWindowId
+        updateLastNonPopupWindowId(windowId);
+
         spacesService.handleWindowFocussed(windowId);
     });
 
@@ -252,9 +267,16 @@ var spaces = (() => {
                 return true;
 
             case 'requestShowSpaces':
-                chrome.windows.getLastFocused({ populate: false }, window => {
-                    showSpacesOpenWindow(window.id);
-                });
+                // 優先使用 lastNonPopupWindowId
+                if (lastNonPopupWindowId) {
+                    showSpacesOpenWindow(lastNonPopupWindowId);
+                } else {
+                    // 如果 lastNonPopupWindowId 不存在，則獲取最後聚焦的窗口
+                    chrome.windows.getLastFocused({ populate: false }, window => {
+                        lastNonPopupWindowId = window.id; // 更新 lastNonPopupWindowId
+                        showSpacesOpenWindow(window.id);
+                    });
+                }
                 return false;
 
             case 'requestShowSwitcher':
@@ -475,27 +497,23 @@ var spaces = (() => {
             url = chrome.runtime.getURL(
                 `spaces.html#windowId=${windowId}&editMode=true`
             );
+        } else if (windowId) {
+            url = chrome.runtime.getURL(`spaces.html#windowId=${windowId}`);
         } else {
             url = chrome.runtime.getURL('spaces.html');
         }
 
-        // if spaces open window already exists then just give it focus (should be up to date)
+        // 如果已經存在開啟的 spaces 窗口，則只需聚焦並更新 URL
         if (spacesOpenWindowId) {
-            chrome.windows.get(
-                spacesOpenWindowId,
-                { populate: true },
-                window => {
-                    chrome.windows.update(spacesOpenWindowId, {
-                        focused: true,
-                    });
+            chrome.windows.get(spacesOpenWindowId, { populate: true }, window => {
+                chrome.windows.update(spacesOpenWindowId, { focused: true }, () => {
                     if (window.tabs[0].id) {
                         chrome.tabs.update(window.tabs[0].id, { url });
                     }
-                }
-            );
-
-            // otherwise re-create it
+                });
+            });
         } else {
+            // 否則，創建一個新的 pop-up 窗口
             chrome.windows.create(
                 {
                     type: 'popup',
